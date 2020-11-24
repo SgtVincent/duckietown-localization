@@ -1,0 +1,19 @@
+{
+    "python.pythonPath": "/home/chenjunting/anaconda3/envs/duckie/bin/python",
+    "python.autoComplete.extraPaths": [
+        "/opt/ros/noetic/lib/python3/dist-packages",
+        "/home/chenjunting/duckietown/dt-ros-commons/packages/duckietown/include",
+        "/code/catkin_ws/src/dt-ros-commons/packages/duckietown/include",
+        "/home/chenjunting/duckietown/duckietown-localization/packages/encoder_localization/src",
+        //"/code/catkin_ws/devel/lib/python3/dist-packages/",
+        //"/code/catkin_ws/devel/lib/python3/dist-packages/duckietown",
+    ],
+    "python.analysis.extraPaths": [
+        "/opt/ros/noetic/lib/python3/dist-packages",
+        "/home/chenjunting/duckietown/dt-ros-commons/packages/duckietown/include",
+        "/code/catkin_ws/src/dt-ros-commons/packages/duckietown/include",
+        "/home/chenjunting/duckietown/duckietown-localization/packages/encoder_localization/src",
+        //"/code/catkin_ws/devel/lib/python3/dist-packages/",
+        //"/code/catkin_ws/devel/lib/python3/dist-packages/duckietown",
+    ]
+}

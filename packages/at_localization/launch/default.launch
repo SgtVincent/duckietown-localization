@@ -1,0 +1,8 @@
+<launch>
+  <arg name="veh"/>
+  <group ns="$(arg veh)">
+    <node pkg="at_localization" type="main.py" name="at_localization" output="screen">
+    </node>
+  </group>
+
+</launch>

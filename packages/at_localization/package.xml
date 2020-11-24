@@ -1,0 +1,11 @@
+<package>
+  <name>at_localization</name>
+  <version>0.1.0</version>
+  <description>
+  Estimator of localization using only apriltag.
+  </description>
+  <maintainer email="sgt79911030@gmail.com">Junting Chen</maintainer>
+  <license>None</license>
+
+  <buildtool_depend>catkin</buildtool_depend>
+</package>
