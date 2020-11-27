@@ -1,7 +1,7 @@
 # parameters
-ARG REPO_NAME="<duckietown-localization>"
-ARG DESCRIPTION="<duckietown-localization>"
-ARG MAINTAINER="<Junting Chen> (sgt79911030@gmail.com)"
+ARG REPO_NAME="duckietown-localization"
+ARG DESCRIPTION="duckietown-localization"
+ARG MAINTAINER="Junting Chen (sgt79911030@gmail.com)"
 # pick an icon from: https://fontawesome.com/v4.7.0/icons/
 ARG ICON="cube"
 
@@ -83,4 +83,4 @@ LABEL org.duckietown.label.module.type="${REPO_NAME}" \
 # <== Do not change the code above this line
 # <==================================================
 ENV VEHICLE_NAME "duckiechan"
-# ENV DEBUG "True"
+ENV DEBUG "True"

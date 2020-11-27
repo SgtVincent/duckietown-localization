@@ -111,17 +111,18 @@ class EncoderLocNode(DTROS):
             [0.0, -1.0, 0.0, 0.09], # 9cm
             [0.0, 0.0, 0.0, 1.0]
         ]) 
-        # self.tf_apriltag2map = np.array([   # from apriltag to map
-        #     [1.0, 0.0, 0.0, 0.0],
-        #     [0.0, 0.0, -1.0, 0.0],
-        #     [0.0, 1.0, 0.0, 0.09], # 9cm
-        #     [0.0, 0.0, 0.0, 1.0]
-        # ]) 
+
         self.tf_cameraFapriltag = None # from apriltag to camera
         self.tf_mapFcamera = None # from camera to map 
         self.tf_cameraFbaselink = None # from baselink to camera
 
-        self.tf_mapFbaselink = None # target tf, from baselink to map 
+        self.tf_mapFbaselink = np.array([   # from baselink to map
+            [1.0, 0.0, 0.0, 1.0],
+            [0.0, 1.0, 0.0, 0.0],
+            [0.0, 0.0, 1.0, 0.0], # 9cm
+            [0.0, 0.0, 0.0, 1.0]
+        ]) 
+
 
 ############################# member objects needed to init before pub&sub ##################
         self.odm = None 
@@ -140,7 +141,8 @@ class EncoderLocNode(DTROS):
             debug=0,
             #searchpath=[]
         )
-
+  
+        self.odm = WheelOdometry(self._radius, self._baseline, self.tf_mapFbaselink, self)
 ############################## subscribers and publishers ####################################
         self.sub_encoder_ticks_left = rospy.Subscriber(
             f'/{self.veh_name}/left_wheel_encoder_node/tick',
@@ -296,8 +298,8 @@ class EncoderLocNode(DTROS):
                 self.tf_mapFcamera = self.tf_mapFapriltag @ np.linalg.inv(self.tf_cameraFapriltag) 
                 # T_b2m = T_b2c @ T_c2m
                 self.tf_mapFbaselink = self.tf_mapFcamera @ self.tf_cameraFbaselink
-                # first localization finished 
-                self.odm = WheelOdometry(self._radius, self._baseline, self.tf_mapFbaselink, self, frequency=10)
+
+                self.odm.update_pose(pose=self.tf_mapFbaselink)
                 
                 # self.odm.start()
                 
@@ -320,15 +322,13 @@ class EncoderLocNode(DTROS):
         return 
 
     def cb_encoder_data_left(self, msg):
-        if self.first_loc:
-            self.odm.update_wheel("left_wheel", msg)
+        self.odm.update_wheel("left_wheel", msg)
         return 
         
 
     def cb_encoder_data_right(self, msg):
         # self.logdebug(f"Main: cb_encoder_data_right called")
-        if self.first_loc:
-            self.odm.update_wheel("right_wheel", msg)
+        self.odm.update_wheel("right_wheel", msg)
         pass
 
     ### In the lastest dt-car-interface, direction has already been considered
@@ -379,37 +379,36 @@ class EncoderLocNode(DTROS):
     def run(self):
         rate = rospy.Rate(30)
         while not rospy.is_shutdown():
-            if self.first_loc:
-                # DEBUG
-            
-                # self.broadcast_tf(self.tf_mapFcamera,
-                #                 rospy.Time.now(),
-                #                 "camera",
-                #                 "map")
+            # DEBUG
+        
+            # self.broadcast_tf(self.tf_mapFcamera,
+            #                 rospy.Time.now(),
+            #                 "camera",
+            #                 "map")
 
-                # self.broadcast_tf(self.tf_mapFapriltag,
-                #                 rospy.Time.now(),
-                #                 "apriltag",
-                #                 "map"
-                # )
+            # self.broadcast_tf(self.tf_mapFapriltag,
+            #                 rospy.Time.now(),
+            #                 "apriltag",
+            #                 "map"
+            # )
 
-                # self.broadcast_tf(self.tf_mapFbaselink, 
-                #                 rospy.Time.now(),
-                #                 "encoder_baselink",
-                #                 "map")
+            # self.broadcast_tf(self.tf_mapFbaselink, 
+            #                 rospy.Time.now(),
+            #                 "encoder_baselink",
+            #                 "map")
 
-                # self.broadcast_tf(np.linalg.inv(self.tf_cameraFbaselink), # camera to baselink
-                #                 rospy.Time.now(),
-                #                 "camera",
-                #                 "encoder_baselink")
-                self.odm.run_update_pose()
-                pose_baselink_in_map = self.odm.get_baselink_matrix()
-                self.broadcast_tf(
-                    pose_baselink_in_map,
-                    rospy.Time.now(),
-                    "encoder_baselink",
-                    "map"
-                )
+            # self.broadcast_tf(np.linalg.inv(self.tf_cameraFbaselink), # camera to baselink
+            #                 rospy.Time.now(),
+            #                 "camera",
+            #                 "encoder_baselink")
+            self.odm.run_update_pose()
+            pose_baselink_in_map = self.odm.get_baselink_matrix()
+            self.broadcast_tf(
+                pose_baselink_in_map,
+                rospy.Time.now(),
+                "encoder_baselink",
+                "map"
+            )
                 
             rate.sleep()
 

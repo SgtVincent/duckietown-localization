@@ -5,30 +5,33 @@ import yaml
 import rospy
 import sys
 import numpy as np
+from rospy.core import logerr
 import tf
 import cv2 
-
+import enum
+import time
 
 from threading import Thread
 from concurrent.futures import ThreadPoolExecutor
-from rosgraph.names import REMAP
-from std_msgs.msg import Header, Float32
-from sensor_msgs.msg import CompressedImage, CameraInfo
 from cv_bridge import CvBridge, CvBridgeError
 from rospy import Subscriber, Publisher
-from tf import TransformBroadcaster
-
-from duckietown_msgs.msg import Twist2DStamped, WheelEncoderStamped, WheelsCmdStamped
+from tf import TransformBroadcaster, TransformListener
 from duckietown.dtros import DTROS, NodeType, TopicType, DTParam, ParamType
 from dt_apriltags import Detector
+
+from geometry_msgs.msg import Pose, PoseStamped, PoseArray, Quaternion, Point
+from duckietown_msgs.msg import Twist2DStamped, WheelEncoderStamped, WheelsCmdStamped
+from fused_localization.srv import UpdatePose, UpdatePoseResponse
+from std_msgs.msg import Header, Float32
+from sensor_msgs.msg import CompressedImage, CameraInfo
 
 # local import 
 from utils.rectification import Rectify
 from utils.wheel_odometry import WheelOdometry
-LEFT = 0
-RIGHT = 2
-FORWARD = 1
-BACKWARD = -1
+
+fuse_state = enum.Enum("FuseState", ["USE_WHEEL", "USE_AT"])
+
+
 
 def calc_dist(ticks, resolution, radius):
     x = 2*np.pi*radius*float(ticks)/float(resolution)
@@ -75,13 +78,13 @@ def homography2transformation(H, K):
     return T
 
 
-class AtLocNode(DTROS):
+class FusedLocNode(DTROS):
 
     def __init__(self, node_name):
 
 ################################ params, variables and flags ####################################
         # Initialize the DTROS parent class
-        super(AtLocNode, self).__init__(node_name, NodeType.GENERIC)
+        super(FusedLocNode, self).__init__(node_name, NodeType.GENERIC)
         self.veh_name = rospy.get_namespace().strip("/")
         self.node_name = rospy.get_name().strip("/")
         # Get static parameters
@@ -100,7 +103,12 @@ class AtLocNode(DTROS):
         self.camera_info_received = False
         # flag of whether initial localization finished  
         self.first_loc = False
-        
+
+        self.fuse_state = fuse_state.USE_WHEEL # use wheel from start 
+        self.last_at_detected = time.time()
+
+        ####################### transforms declaration ##########################
+        # 1. pre_defined tfs 
         # from apriltag to map, simple translation
         self.tf_mapFapriltag = np.array([   
             [1.0, 0.0, 0.0, 0.0],
@@ -109,34 +117,49 @@ class AtLocNode(DTROS):
             [0.0, 0.0, 0.0, 1.0]
         ]) 
         # to rotate the pose of camera & apriltags to meet the outputrequirement
-        self.tf_camera_convention_rotation = np.array([   # rotate camera to meet the output requirement
-            [0.0, 0.0, 1.0, 0.0],
-            [-1.0, 0.0, 0.0, 0.0],
-            [0.0, -1.0, 0.0, 0.0], 
+        self.ori_cameraFoutput_camera = np.array([   # rotate camera to meet the output requirement
+            [0.0, -1.0, 0.0, 0.0],
+            [0.0, 0.0, -1.0, 0.0],
+            [1.0, 0.0, 0.0, 0.0], 
             [0.0, 0.0, 0.0, 1.0]
         ]) 
-        self.tf_apriltag_convention_rotation = np.array([   # rotate apriltag to meet the output requirement
+        self.tf_output_apriltagFori_apriltag = np.array([   # rotate apriltag to meet the output requirement
             [0.0, 0.0, -1.0, 0.0],
             [1.0, 0.0, 0.0, 0.0],
             [0.0, -1.0, 0.0, 0.0], 
             [0.0, 0.0, 0.0, 1.0]
         ])
 
-        self.tf_cameraFapriltag = None # from apriltag to camera
-        self.tf_apriltagFcamera = None # from camera to apriltag
-        self.tf_mapFcamera = None # from camera to map 
-        self.tf_cameraFbaselink = None # from baselink to camera
-        self.tf_mapFbaselink = None # target tf, from baselink to map 
+        self.tf_encoder_baselinkFat_baselink = np.array([   # assume encoder baselink and at baselink overlap at the beginning
+            [1.0, 0.0, 0.0, 0.0],
+            [0.0, 1.0, 0.0, 0.0],
+            [0.0, 0.0, 1.0, 0.0], 
+            [0.0, 0.0, 0.0, 1.0]
+        ])
 
-        # self.tf_output_apriltagFbaselink = None # target tf 
-        self.tf_output_cameraFbaselink = None # target tf 
+        # self.initial_mapFbaselink = None # should be defined in encoder_localization node 
+
+        # 2. tfs available after receiving camera_info 
+        self.tf_mapFencoder_baselink = None # from encoder baselink to map, provided by encoder_localization node 
+        # self.tf_mapFcamera = None # from camera to map 
+        self.tf_cameraFbaselink = None # from at_baselink to camera
+        self.tf_baselinkFcamera = None # inverse of cameraFbaselink
+        self.tf_mapFfused_baselink = None 
+        self.tf_mapFoutput_camera = None 
+
+        # 3. tfs available after first apriltag detection
+        self.tf_cameraFapriltag = None 
+        self.tf_apriltagFcamera = None # from camera to apriltag
+        self.tf_mapFat_baselink = None 
+
+        # 4. tfs available after apriltag missing 
+        self.tf_at_baselinkFencoder_baselink = None 
 
 ############################# member objects needed to init before pub&sub ##################
-        self.odm = None 
         self.bridge = CvBridge()
         self.rectifier = None
         self.tf_bcaster = TransformBroadcaster()
-
+        self.tf_listener = TransformListener()
         # apriltag detector
         self.at_detector = Detector(families='tag36h11',
                        nthreads=4,
@@ -147,31 +170,6 @@ class AtLocNode(DTROS):
                        debug=0)
 
 ############################## subscribers and publishers ####################################
-        # self.sub_encoder_ticks_left = rospy.Subscriber(
-        #     f'/{self.veh_name}/left_wheel_encoder_node/tick',
-        #     WheelEncoderStamped,
-        #     self.cb_encoder_data_left,
-        #     queue_size=1   
-        # )
-        # self.log(f"listening to {f'/{self.veh_name}/left_wheel_encoder_node/tick'}")
-        
-        # self.sub_encoder_ticks_right = rospy.Subscriber(
-        #     f'/{self.veh_name}/right_wheel_encoder_node/tick',
-        #     WheelEncoderStamped,
-        #     self.cb_encoder_data_right,
-        #     queue_size=1
-        # )
-        # self.log(f"listening to {f'/{self.veh_name}/right_wheel_encoder_node/tick'}")
-        
-        ### In the lastest dt-car-interface, direction has already been considered
-        ### Thus direction no longer needed to be considered 
-        # self.sub_executed_commands = rospy.Subscriber(
-        #     f'/{self.veh_name}/wheels_driver_node/wheels_cmd_executed',
-        #     WheelsCmdStamped,
-        #     self.cb_executed_commands,
-        #     queue_size=1
-        # )
-        self.log(f"listening to {f'/{self.veh_name}/wheels_driver_node/wheels_cmd_executed'}")
         
         self.sub_camera_info = Subscriber(
             f'/{self.veh_name}/camera_node/camera_info', 
@@ -189,29 +187,6 @@ class AtLocNode(DTROS):
             queue_size=1
         )
         self.log(f"listening to {f'/{self.veh_name}/camera_node/image/compressed'}")
-
-        # Publishers
-
-        # self.pub_baselink = rospy.Publisher(
-        #     "~TF/encoder_baselink",
-        #     Float32,
-        #     queue_size=1
-        # )
-        # self.log(f"Publishing data to {f'/{self.veh_name}/{self.node_name}/TF/encoder_baselink'}")
-
-        # self.pub_integrated_distance_left = rospy.Publisher(
-        #     "~left_wheel_distance",
-        #     Float32,
-        #     queue_size=1
-        # )
-        # self.log(f"Publishing data to {f'/{self.veh_name}/{self.node_name}/left_wheel_distance'}")
-
-        # self.pub_integrated_distance_right = rospy.Publisher(
-        #     "~right_wheel_distance",
-        #     Float32,
-        #     queue_size=1
-        # )
-        # self.log(f"Publishing data to {f'/{self.veh_name}/{self.node_name}/left_wheel_distance'}")
 
         self.log("Class EncoderLocNode initialized")
     
@@ -248,6 +223,25 @@ class AtLocNode(DTROS):
 
         return calib_data['homography']
 
+    def update_encoder_baselink(self):
+        # get encoder pose from TF tree
+        try:
+            tvec, rvec = self.tf_listener.lookupTransform(
+                "map",
+                "encoder_baselink",
+                rospy.Time()
+            )
+            pose_mat = tf.transformations.quaternion_matrix(rvec)
+            pose_mat[:3, 3] = np.array(tvec)
+            self.tf_mapFencoder_baselink = pose_mat
+
+            if self.first_loc == False:
+                self.first_loc = True
+
+        except (tf.LookupException, tf.ConnectivityException, tf.ExtrapolationException) as e: 
+            self.logwarn(e)
+        return 
+
     # broadcast a transform matrix as tf type 
     def broadcast_tf(self, tf_mat, time, # rospy.Time()
         child="encoder_baselink",
@@ -275,14 +269,45 @@ class AtLocNode(DTROS):
                                 parent)
         return 
 
+    # when apriltag reappears in camera, update encoder_baselink by call ros service 
+    def call_srv_update_pose(self, pose_mat):
+        self.logdebug(f"enter call_srv_update_pose, waiting for {f'/{self.veh_name}/encoder_localization_node/update_pose'}")
+        
+        # 1. compose pose_stamped message from pose_mat
+        def _matrix_to_quaternion(r):
+            T = np.array((
+                (0, 0, 0, 0),
+                (0, 0, 0, 0),
+                (0, 0, 0, 0),
+                (0, 0, 0, 1)
+            ), dtype=np.float64)
+            T[0:3, 0:3] = r
+            return tf.transformations.quaternion_from_matrix(T)
+        
+        rvec = _matrix_to_quaternion(pose_mat[:3,:3])
+        tvec = pose_mat[:3, 3].reshape(-1).tolist()
+        
+        pose_stamped = PoseStamped()
+        pose_stamped.header.frame_id = "map"
+        pose_stamped.header.stamp = rospy.Time.now()
+        pose_stamped.pose.position = Point(*tvec)
+        pose_stamped.pose.orientation = Quaternion(*rvec)
+        # 2. call ros service with pose_stamped message as data
+        rospy.wait_for_service(f'/{self.veh_name}/encoder_localization_node/update_pose')
+        try:
+            update_pose = rospy.ServiceProxy('add_two_ints', UpdatePose)
+            ack = update_pose(pose_stamped)
+            return ack
+        except rospy.ServiceException as e:
+            self.logwarn("Service call failed: %s"%e)
+
     def detect(self, img):
 
         greyscale_img = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
         tags = self.at_detector.detect(greyscale_img, True,
                             self.at_camera_params, self.at_tag_size)
-        
-        
-        # calculate poses of all tags
+
+        # only choose the first tag to compute tfs 
         count = 0
         # select the first tag
         for tag in tags: 
@@ -296,52 +321,16 @@ class AtLocNode(DTROS):
 
             self.tf_cameraFapriltag = tf_cameraFapriltag
             self.tf_apriltagFcamera = np.linalg.inv(self.tf_cameraFapriltag)
-            self.tf_apriltagFbaselink = self.tf_apriltagFcamera @ self.tf_cameraFbaselink
-            # to meet the output requirement 
-            self.tf_apriltagFbaselink = self.tf_apriltag_convention_rotation @ self.tf_apriltagFbaselink
-            
-            # calculate transform from baselink to map
-            self.tf_mapFcamera = self.tf_mapFapriltag @ self.tf_apriltagFcamera
-            # self.tf_mapFbaselink = self.tf_mapFcamera @ self.tf_cameraFbaselink
-            self.tf_mapFbaselink = self.tf_mapFapriltag @ self.tf_apriltagFbaselink
-            
-            if self.first_loc == False:
-                self.first_loc = True
-            
+            # ATTENTION: should rotate the apriltag to meet the output requirement
+            self.tf_apriltagFbaselink = self.tf_output_apriltagFori_apriltag @ self.tf_apriltagFcamera @ self.tf_cameraFbaselink
+            self.tf_mapFat_baselink = self.tf_mapFapriltag @ self.tf_apriltagFbaselink
+
             count += 1
+
             break
-                   
+                     
+        return count
 
-
-        
-        return count 
-
-    # def cb_encoder_data_left(self, msg):
-    #     if self.first_loc:
-    #         self.odm.update_wheel("left_wheel", msg)
-    #     return 
-        
-
-    # def cb_encoder_data_right(self, msg):
-    #     # self.logdebug(f"Main: cb_encoder_data_right called")
-    #     if self.first_loc:
-    #         self.odm.update_wheel("right_wheel", msg)
-    #     pass
-
-    ### In the lastest dt-car-interface, direction has already been considered
-    ### Thus direction no longer needed to be considered 
-    # def cb_executed_commands(self, msg):
-    #     """ Use the executed commands to determine the direction of travel of each wheel.
-    #     """
-    #     if msg.vel_left >= 0:
-    #         self.left_wheel.direction = FORWARD
-    #     else:
-    #         self.left_wheel.direction = BACKWARD
-    #     if msg.vel_right >= 0:
-    #         self.right_wheel.direction = FORWARD
-    #     else:
-    #         self.right_wheel.direction = BACKWARD
-    
     def cb_camera_info(self, msg):
 
         # self.logdebug("camera info received! ")
@@ -353,9 +342,8 @@ class AtLocNode(DTROS):
             self.at_camera_params = (self.camera_P[0,0], self.camera_P[1,1],
                                      self.camera_P[0,2], self.camera_P[1,2])
             self.tf_cameraFbaselink = homography2transformation(self.homography_g2p, self.camera_K)
-            self.tf_output_cameraFbaselink = self.tf_camera_convention_rotation @ self.tf_cameraFbaselink
-
-            self.log(f"tf_cameraFbaselink is {self.tf_cameraFbaselink}")
+            self.tf_baselinkFcamera = np.linalg.inv(self.tf_cameraFbaselink)       
+            # self.log(f"tf_cameraFbaselink is {self.tf_cameraFbaselink}")
             self.camera_info_received = True
 
         return
@@ -371,49 +359,94 @@ class AtLocNode(DTROS):
         rect_img = self.rectifier.rectify(cv2_img)
         
         # detect tags
-        self.detect(rect_img)
+        detect_count = self.detect(rect_img)
         
+        # reset last_at_detected timer
+        if detect_count > 0:  
+            self.last_at_detected = time.time()
+
+        self.logdebug(f"{detect_count} apriltags detected in image")
+        
+        # fuse state transfer
+        if detect_count == 0:
+            # apriltags disappear from camera
+            # record wheel encoder
+            if self.fuse_state == fuse_state.USE_AT:
+                # 0. check the time elapse of no tag detected is long enough
+                elapse_at_missing = time.time() - self.last_at_detected
+                if elapse_at_missing > 0.3: 
+                    # 1. record transform from at_baseline to encoder_baseline
+                    self.tf_encoder_baselinkFat_baselink = np.linalg.inv(self.tf_mapFencoder_baselink) @ self.tf_mapFat_baselink
+
+                    # 2. set fuse_state to USE_WHEEL
+                    self.fuse_state = fuse_state.USE_WHEEL
+            
+                    self.log("Switch to using wheel encoder")
+
+        if detect_count > 0:
+            # apriltag reappear in camera, switch back to using at_baseline
+            if self.fuse_state == fuse_state.USE_WHEEL:
+                # 1. call ros service to update baselink pose in encoder node
+                self.call_srv_update_pose(self.tf_mapFat_baselink)
+                # 2. set fuse_state back to USE_AT
+                self.fuse_state = fuse_state.USE_AT
+                self.log("Switch to using apriltag detector")
         return 
 
     def run(self):
         rate = rospy.Rate(10)
         while not rospy.is_shutdown():
-            ######### publish apriltag detection TF 
-            if self.camera_info_received:
+
+            # update encoder baselink from encoder localization node 
+            self.update_encoder_baselink()
+
+            # initialization requires: 
+            #     camera_info received to get tf_cameraFbaselink
+            #     tf_mapFencoder_baselink from encoder localization node  
+            if self.camera_info_received and self.first_loc:
+                # using wheel encoder to localize
+                if self.fuse_state == fuse_state.USE_WHEEL:
+                    
+                    self.tf_mapFfused_baselink = self.tf_mapFencoder_baselink @ self.tf_encoder_baselinkFat_baselink
+                    self.broadcast_tf(
+                        self.tf_mapFfused_baselink,
+                        rospy.Time.now(),
+                        "fused_baselink",
+                        "map"
+                    )
+
+                elif self.fuse_state  == fuse_state.USE_AT:
+
+                    self.broadcast_tf(
+                        self.tf_mapFat_baselink,
+                        rospy.Time.now(),
+                        "at_baselink",
+                        "map"
+                    )
+
+                    self.tf_mapFfused_baselink = self.tf_mapFat_baselink
+                    self.broadcast_tf(
+                        self.tf_mapFfused_baselink,
+                        rospy.Time.now(),
+                        "fused_baselink",
+                        "map"
+                    )
+                else:
+                    self.logerr(f"fuse state {self.fuse_state} not implemented!")
                 
-                self.broadcast_tf(np.linalg.inv(self.tf_output_cameraFbaselink), # camera to baselink
+
+                # calculate and publish transform from camera to map
+                self.tf_mapFoutput_camera = self.tf_mapFfused_baselink @ self.tf_baselinkFcamera @ self.ori_cameraFoutput_camera
+                self.broadcast_tf(
+                    np.linalg.inv(self.tf_mapFoutput_camera), # camera to baselink
                     rospy.Time.now(),
                     "camera",
-                    "encoder_baselink")
+                    "map")
 
-            if self.first_loc:
-            
-
-                self.broadcast_tf(np.linalg.inv(self.tf_mapFbaselink),
-                    rospy.Time.now(),
-                    "map",
-                    "encoder_baselink")
-                self.broadcast_tf(np.linalg.inv(self.tf_apriltagFbaselink),
-                    rospy.Time.now(),
-                    "apriltag",
-                    "encoder_baselink")
-                # DEBUG
-
-                ######## publish wheel odometry TF ################
-                # self.odm.run_update_pose()
-                # pose_baselink_in_map = self.odm.get_baselink_matrix()
-                # self.broadcast_tf(
-                #     pose_baselink_in_map,
-                #     rospy.Time.now(),
-                #     "encoder_baselink",
-                #     "map"
-                # )
-                rate.sleep()
-   
             rate.sleep()
 
 if __name__ == '__main__':
-    node = AtLocNode(node_name='at_localization')
+    node = FusedLocNode(node_name='at_localization')
     # Keep it spinning to keep the node alive
 
     

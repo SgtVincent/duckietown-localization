@@ -203,9 +203,9 @@ class WheelOdometry:
             self.cur_pos, self.theta = self.drive(self.cur_pos, self.theta, left_rate, right_rate, 
                 2*self.baseline, self.radius, time_delta)
             
-            if self.logger:
-                self.logger.logdebug(f"WheelOdometry: left/right rates are {left_rate},{right_rate}")
-                self.logger.logdebug(f"WheelOdometry: cur_pos/angle are {self.cur_pos},{self.theta}")
+            # if self.logger:
+            #     self.logger.logdebug(f"WheelOdometry: left/right rates are {left_rate},{right_rate}")
+            #     self.logger.logdebug(f"WheelOdometry: cur_pos/angle are {self.cur_pos},{self.theta}")
         
     
     # convert the (x,y,theta) representation to 4x4 rotation matrix with all points in x-y plane 
