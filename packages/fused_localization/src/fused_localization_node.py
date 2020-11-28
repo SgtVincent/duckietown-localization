@@ -117,12 +117,12 @@ class FusedLocNode(DTROS):
             [0.0, 0.0, 0.0, 1.0]
         ]) 
         # to rotate the pose of camera & apriltags to meet the outputrequirement
-        self.ori_cameraFoutput_camera = np.array([   # rotate camera to meet the output requirement
-            [0.0, -1.0, 0.0, 0.0],
-            [0.0, 0.0, -1.0, 0.0],
-            [1.0, 0.0, 0.0, 0.0], 
+        self.tf_output_cameraFori_camera = np.array([   # rotate camera to meet the output requirement
+            [0.0, 0.0, 1.0, 0.0],
+            [-1.0, 0.0, 0.0, 0.0],
+            [0.0, -1.0, 0.0, 0.0], 
             [0.0, 0.0, 0.0, 1.0]
-        ]) 
+        ])  
         self.tf_output_apriltagFori_apriltag = np.array([   # rotate apriltag to meet the output requirement
             [0.0, 0.0, -1.0, 0.0],
             [1.0, 0.0, 0.0, 0.0],
@@ -231,12 +231,14 @@ class FusedLocNode(DTROS):
                 "encoder_baselink",
                 rospy.Time()
             )
+            self.logdebug(f"Received encoder baselink with rvec({rvec}), tvec({tvec})")
             pose_mat = tf.transformations.quaternion_matrix(rvec)
             pose_mat[:3, 3] = np.array(tvec)
             self.tf_mapFencoder_baselink = pose_mat
 
             if self.first_loc == False:
                 self.first_loc = True
+                self.log("Get first encoder_baselink from tf tree, initialized finished!")
 
         except (tf.LookupException, tf.ConnectivityException, tf.ExtrapolationException) as e: 
             self.logwarn(e)
@@ -295,7 +297,7 @@ class FusedLocNode(DTROS):
         # 2. call ros service with pose_stamped message as data
         rospy.wait_for_service(f'/{self.veh_name}/encoder_localization_node/update_pose')
         try:
-            update_pose = rospy.ServiceProxy('add_two_ints', UpdatePose)
+            update_pose = rospy.ServiceProxy(f'/{self.veh_name}/encoder_localization_node/update_pose', UpdatePose)
             ack = update_pose(pose_stamped)
             return ack
         except rospy.ServiceException as e:
@@ -342,8 +344,9 @@ class FusedLocNode(DTROS):
             self.at_camera_params = (self.camera_P[0,0], self.camera_P[1,1],
                                      self.camera_P[0,2], self.camera_P[1,2])
             self.tf_cameraFbaselink = homography2transformation(self.homography_g2p, self.camera_K)
+            self.tf_output_cameraFbaselink = self.tf_output_cameraFori_camera @ self.tf_cameraFbaselink
             self.tf_baselinkFcamera = np.linalg.inv(self.tf_cameraFbaselink)       
-            # self.log(f"tf_cameraFbaselink is {self.tf_cameraFbaselink}")
+            self.log(f"tf_output_cameraFbaselink is \n{self.tf_output_cameraFbaselink}")
             self.camera_info_received = True
 
         return
@@ -365,8 +368,8 @@ class FusedLocNode(DTROS):
         if detect_count > 0:  
             self.last_at_detected = time.time()
 
-        self.logdebug(f"{detect_count} apriltags detected in image")
-        
+        # self.logdebug(f"{detect_count} apriltags detected in image")
+
         # fuse state transfer
         if detect_count == 0:
             # apriltags disappear from camera
@@ -374,7 +377,7 @@ class FusedLocNode(DTROS):
             if self.fuse_state == fuse_state.USE_AT:
                 # 0. check the time elapse of no tag detected is long enough
                 elapse_at_missing = time.time() - self.last_at_detected
-                if elapse_at_missing > 0.3: 
+                if elapse_at_missing > 0.5: 
                     # 1. record transform from at_baseline to encoder_baseline
                     self.tf_encoder_baselinkFat_baselink = np.linalg.inv(self.tf_mapFencoder_baselink) @ self.tf_mapFat_baselink
 
@@ -406,7 +409,7 @@ class FusedLocNode(DTROS):
             if self.camera_info_received and self.first_loc:
                 # using wheel encoder to localize
                 if self.fuse_state == fuse_state.USE_WHEEL:
-                    
+                    # DEBUG
                     self.tf_mapFfused_baselink = self.tf_mapFencoder_baselink @ self.tf_encoder_baselinkFat_baselink
                     self.broadcast_tf(
                         self.tf_mapFfused_baselink,
@@ -414,7 +417,12 @@ class FusedLocNode(DTROS):
                         "fused_baselink",
                         "map"
                     )
-
+                    # self.broadcast_tf(
+                    #     np.linalg.inv(self.tf_mapFfused_baselink),
+                    #     rospy.Time.now(),
+                    #     "map",
+                    #     "fused_baselink"
+                    # )
                 elif self.fuse_state  == fuse_state.USE_AT:
 
                     self.broadcast_tf(
@@ -434,15 +442,24 @@ class FusedLocNode(DTROS):
                 else:
                     self.logerr(f"fuse state {self.fuse_state} not implemented!")
                 
-
+                # self.logdebug(f"publish tf_mapFfused_baselink:\n{self.tf_mapFfused_baselink}")
                 # calculate and publish transform from camera to map
-                self.tf_mapFoutput_camera = self.tf_mapFfused_baselink @ self.tf_baselinkFcamera @ self.ori_cameraFoutput_camera
+
+                self.tf_mapFoutput_camera = self.tf_mapFfused_baselink @ np.linalg.inv(self.tf_output_cameraFbaselink)
+                # self.logdebug(f"publish tf_mapFoutput_camera:\n{self.tf_mapFoutput_camera}")
+                # calculate and publish transform from camera to map
                 self.broadcast_tf(
-                    np.linalg.inv(self.tf_mapFoutput_camera), # camera to baselink
+                    self.tf_mapFoutput_camera, # camera to baselink
                     rospy.Time.now(),
                     "camera",
                     "map")
-
+                #DEBUG
+                # self.tf_baselinkFoutput_camera = np.linalg.inv(self.tf_output_cameraFbaselink)
+                # self.broadcast_tf(
+                #     self.tf_baselinkFoutput_camera, # camera to baselink
+                #     rospy.Time.now(),
+                #     "camera",
+                #     "fused_baselink")
             rate.sleep()
 
 if __name__ == '__main__':

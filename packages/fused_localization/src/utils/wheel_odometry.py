@@ -183,7 +183,8 @@ class WheelOdometry:
             self.last_pose_update = time.time()
             self.left_wheel.last_ticks = self.left_wheel.ticks
             self.right_wheel.last_ticks = self.right_wheel.ticks
-
+            # if self.logger:
+            #     self.logger.logdebug(f"WheelOdometry: update_pose called cur_pos/theta is: {self.cur_pos},{self.theta}")
         else: # run normal update step 
             
             # calculate delta of two wheels 

@@ -115,6 +115,22 @@ class EncoderLocNode(DTROS):
         self.tf_bcaster = TransformBroadcaster()
 
 ############################## subscribers and publishers ####################################
+        self.sub_encoder_ticks_left = rospy.Subscriber(
+            f'/{self.veh_name}/left_wheel_encoder_node/tick',
+            WheelEncoderStamped,
+            self.cb_encoder_data_left,
+            queue_size=1   
+        )
+        self.log(f"listening to {f'/{self.veh_name}/left_wheel_encoder_node/tick'}")
+        
+        self.sub_encoder_ticks_right = rospy.Subscriber(
+            f'/{self.veh_name}/right_wheel_encoder_node/tick',
+            WheelEncoderStamped,
+            self.cb_encoder_data_right,
+            queue_size=1
+        )
+        self.log(f"listening to {f'/{self.veh_name}/right_wheel_encoder_node/tick'}")
+        
         self.srv_update_pose =  rospy.Service(
             f'~/{self.node_name}/update_pose', 
             UpdatePose, 
@@ -176,7 +192,7 @@ class EncoderLocNode(DTROS):
 
         rvec = _matrix_to_quaternion(tf_mat[:3,:3])
         tvec = tf_mat[:3, 3].reshape(-1)
-
+        # self.logdebug(f"Published encoder_baselink with rvec({rvec}), tvec({tvec}")
         self.tf_bcaster.sendTransform(
                                 tvec.tolist(),
                                 rvec.tolist(),
@@ -186,20 +202,17 @@ class EncoderLocNode(DTROS):
         return 
 
     def handle_update_pose(self, req):
-        pose = req.pose
+        pose = req.pose_stamped.pose
         quat = pose.orientation 
         rvec = [quat.x, quat.y, quat.z, quat.w]
         point = pose.position
         tvec = [point.x, point.y, point.z]
 
-        pose_mat = np.zeros((4,4))
-        R = tf.transformations.quaternion_matrix(rvec)
-        pose_mat[:3, :3] = R
+        pose_mat = tf.transformations.quaternion_matrix(rvec)
         pose_mat[:3, 3] = np.array(tvec)
-        pose_mat[3,3] = 1.0
-        
+
         self.odm.update_pose(pose_mat)
-        return req.header.seq # return sequence number as ACK 
+        return req.pose_stamped.header.seq # return sequence number as ACK 
 
     def cb_encoder_data_left(self, msg):
         self.odm.update_wheel("left_wheel", msg)

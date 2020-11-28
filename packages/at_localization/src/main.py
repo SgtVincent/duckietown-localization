@@ -374,7 +374,7 @@ class AtLocNode(DTROS):
         self.detect(rect_img)
         
         return 
-
+    # baselink as root frame 
     def run(self):
         rate = rospy.Rate(10)
         while not rospy.is_shutdown():
@@ -385,7 +385,7 @@ class AtLocNode(DTROS):
                     rospy.Time.now(),
                     "camera",
                     "encoder_baselink")
-
+    
             if self.first_loc:
             
 
@@ -408,9 +408,43 @@ class AtLocNode(DTROS):
                 #     "encoder_baselink",
                 #     "map"
                 # )
-                rate.sleep()
-   
             rate.sleep()
+    # def run(self):
+    #     rate = rospy.Rate(10)
+    #     while not rospy.is_shutdown():
+    #         ######### publish apriltag detection TF 
+    
+    #         if self.camera_info_received and self.first_loc:
+            
+
+    #             self.broadcast_tf(self.tf_mapFbaselink,
+    #                 rospy.Time.now(),
+    #                 "encoder_baselink",
+    #                 "map")
+                
+              
+    #             self.broadcast_tf(self.tf_mapFapriltag,
+    #                 rospy.Time.now(),
+    #                 "apriltag",
+    #                 "map")
+
+    #             self.broadcast_tf(self.tf_mapFcamera,
+    #                 rospy.Time.now(),
+    #                 "camera",
+    #                 "map")
+    #             # DEBUG
+
+    #             ######## publish wheel odometry TF ################
+    #             # self.odm.run_update_pose()
+    #             # pose_baselink_in_map = self.odm.get_baselink_matrix()
+    #             # self.broadcast_tf(
+    #             #     pose_baselink_in_map,
+    #             #     rospy.Time.now(),
+    #             #     "encoder_baselink",
+    #             #     "map"
+    #             # )
+   
+    #         rate.sleep()
 
 if __name__ == '__main__':
     node = AtLocNode(node_name='at_localization')
